@@ -1,7 +1,7 @@
 import requests
 import feedparser
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from openai import OpenAI
 import os
 
@@ -69,47 +69,55 @@ def get_market():
 
 
 # =========================
-# NEWS FETCH
+# NEWS FETCH (24h 필터 포함)
 # =========================
 
-def get_news(feeds):
+def get_news(feeds, hours=24):
 
     news = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
     for url in feeds:
         feed = feedparser.parse(url)
 
         for entry in feed.entries:
-
-            title = entry.title
-            link = entry.link
+            published = entry.get("published_parsed")
+            if published:
+                pub_dt = datetime(*published[:6], tzinfo=timezone.utc)
+                if pub_dt < cutoff:
+                    continue
 
             news.append({
-                "title": title,
-                "url": link
+                "title": entry.title,
+                "url": entry.link
             })
 
     return news
 
 
 # =========================
-# AI ANALYSIS
+# AI ANALYSIS — Global Top3 (URL 포함)
 # =========================
 
 def analyze_global(news_list):
 
-    titles = "\n".join([n["title"] for n in news_list[:5]])
+    # 제목 + URL 함께 전달
+    items = "\n".join([
+        f"{i+1}. {n['title']} | {n['url']}"
+        for i, n in enumerate(news_list[:10])
+    ])
 
     prompt = f"""
-다음 글로벌 뉴스 제목을 읽고 가장 중요한 3개를 한국어로 요약해줘.
+다음 글로벌 뉴스 목록을 읽고 가장 중요한 3개를 골라 한국어로 요약해줘.
+각 항목에 원문 URL도 함께 포함해줘.
 
-뉴스:
-{titles}
+뉴스 목록 (제목 | URL):
+{items}
 
-형식:
-- 핵심 뉴스1
-- 핵심 뉴스2
-- 핵심 뉴스3
+반드시 아래 형식으로만 답해줘 (다른 말 없이):
+1. [한국어 요약 제목] | [URL]
+2. [한국어 요약 제목] | [URL]
+3. [한국어 요약 제목] | [URL]
 """
 
     response = client.chat.completions.create(
@@ -117,7 +125,30 @@ def analyze_global(news_list):
         messages=[{"role": "user", "content": prompt}]
     )
 
-    return response.choices[0].message.content
+    return response.choices[0].message.content.strip()
+
+
+# =========================
+# 번역 — 태국/인도네시아 뉴스
+# =========================
+
+def translate_title(title):
+
+    if not title or title == "관련 뉴스 없음 (24h)":
+        return title
+
+    prompt = f"""
+다음 영어 뉴스 제목을 자연스러운 한국어로 번역해줘. 번역문만 출력해줘.
+
+{title}
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return response.choices[0].message.content.strip()
 
 
 # =========================
@@ -138,7 +169,37 @@ def generate_insight(text):
         messages=[{"role": "user", "content": prompt}]
     )
 
-    return response.choices[0].message.content
+    return response.choices[0].message.content.strip()
+
+
+# =========================
+# Global Top3 파싱 → Telegram HTML 변환
+# =========================
+
+def format_global_top3(raw_text):
+    """
+    AI가 반환한 텍스트:
+    1. 요약 제목 | https://...
+    2. 요약 제목 | https://...
+    3. 요약 제목 | https://...
+    → Telegram HTML 포맷으로 변환
+    """
+    lines = []
+    for line in raw_text.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if "|" in line:
+            parts = line.split("|", 1)
+            title_part = parts[0].strip().lstrip("123. ").strip()
+            url_part = parts[1].strip()
+            if url_part.startswith("http"):
+                lines.append(f"• {title_part}\n  <a href=\"{url_part}\">Source →</a>")
+            else:
+                lines.append(f"• {title_part}")
+        else:
+            lines.append(f"• {line.lstrip('123. ').strip()}")
+    return "\n\n".join(lines)
 
 
 # =========================
@@ -148,6 +209,10 @@ def generate_insight(text):
 def send_telegram(msg):
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+    # Telegram 4096자 제한 대응
+    if len(msg) > 4096:
+        msg = msg[:4090] + "\n..."
 
     payload = {
         "chat_id": CHAT_ID,
@@ -165,70 +230,90 @@ def send_telegram(msg):
 
 def jeremy_briefing(request=None):
 
+    # 시장 데이터
     usd, kospi, samsung = get_market()
 
+    # 뉴스 수집
     global_news = get_news(GLOBAL_FEEDS)
     th_news = get_news(TH_FEEDS)
     id_news = get_news(ID_FEEDS)
     comp_news = get_news(COMPETITOR_FEEDS)
 
-    # Thailand fallback
+    # Thailand
     if th_news:
-        th_title = th_news[0]["title"]
+        th_title_raw = th_news[0]["title"]
         th_url = th_news[0]["url"]
+        try:
+            th_title = translate_title(th_title_raw)
+        except Exception:
+            th_title = th_title_raw
     else:
         th_title = "관련 뉴스 없음 (24h)"
         th_url = ""
 
-    # Indonesia fallback
+    # Indonesia
     if id_news:
-        id_title = id_news[0]["title"]
+        id_title_raw = id_news[0]["title"]
         id_url = id_news[0]["url"]
+        try:
+            id_title = translate_title(id_title_raw)
+        except Exception:
+            id_title = id_title_raw
     else:
         id_title = "관련 뉴스 없음 (24h)"
         id_url = ""
 
-    # Competitor fallback
+    # Competitor
     comp_titles = []
     comp_urls = []
 
     for n in comp_news[:2]:
-        comp_titles.append(n["title"])
+        try:
+            translated = translate_title(n["title"])
+        except Exception:
+            translated = n["title"]
+        comp_titles.append(translated)
         comp_urls.append(n["url"])
 
     while len(comp_titles) < 2:
         comp_titles.append("관련 뉴스 없음 (24h)")
         comp_urls.append("")
 
-    # AI analysis
+    # AI 분석
     try:
-        global_result = analyze_global(global_news[:10])
+        global_raw = analyze_global(global_news)
+        global_formatted = format_global_top3(global_raw)
     except Exception as e:
-        print("OpenAI error:", str(e))
-        global_result = "AI 분석 실패 (OpenAI quota 또는 API 오류)"
+        print("OpenAI error (global):", str(e))
+        global_raw = "AI 분석 실패 (OpenAI quota 또는 API 오류)"
+        global_formatted = global_raw
 
-    insight = generate_insight(global_result)
+    try:
+        insight = generate_insight(global_raw)
+    except Exception as e:
+        print("OpenAI error (insight):", str(e))
+        insight = "인사이트 생성 실패"
 
-    msg = f"""
-<b>Jeremy Briefing</b>
+    # 메시지 조합
+    msg = f"""<b>📋 Jeremy Briefing</b>
 
-Market Data
+<b>📊 Market Data</b>
 USD/KRW {usd}
 KOSPI {kospi}
 Samsung {samsung}
 
-<b>Global Top3</b>
-{global_result}
+<b>🌍 Global Top3</b>
+{global_formatted}
 
-<b>Thailand Automotive Aftermarket</b>
+<b>🇹🇭 Thailand Automotive Aftermarket</b>
 {th_title}
 {f'<a href="{th_url}">Source →</a>' if th_url else ''}
 
-<b>Indonesia Automotive Aftermarket</b>
+<b>🇮🇩 Indonesia Automotive Aftermarket</b>
 {id_title}
 {f'<a href="{id_url}">Source →</a>' if id_url else ''}
 
-<b>Tinting Competitor News</b>
+<b>🏁 Tinting Competitor News</b>
 
 {comp_titles[0]}
 {f'<a href="{comp_urls[0]}">Source →</a>' if comp_urls[0] else ''}
@@ -236,9 +321,8 @@ Samsung {samsung}
 {comp_titles[1]}
 {f'<a href="{comp_urls[1]}">Source →</a>' if comp_urls[1] else ''}
 
-<b>Jeremy Insight & Action</b>
-{insight}
-"""
+<b>💡 Jeremy Insight & Action</b>
+{insight}"""
 
     send_telegram(msg)
 
