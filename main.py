@@ -306,15 +306,14 @@ while len(comp_titles) < 2:
     try:
        global_result = analyze_global(global_news[:10])
 
-    except Exception as e:
-       print("OpenAI error:", str(e))
+   except Exception as e:
+    print("OpenAI error:", str(e))
 
-       global_result = """
-AI 분석 실패 (OpenAI quota 또는 API 오류)
-
-대신 원문 뉴스:
-""" + "\n".join([n["title"] for n in global_news[:3]])
-
+    global_result = (
+        "AI 분석 실패 (OpenAI quota 또는 API 오류)\n\n"
+        + "대신 원문 뉴스:\n"
+        + "\n".join([n["title"] for n in global_news[:3]])
+    )
     insight=generate_insight(global_result)
 
     msg=f"""
