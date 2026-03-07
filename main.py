@@ -266,8 +266,8 @@ def send_telegram(msg):
 # MAIN ENTRY (Cloud Run HTTP)
 # -----------------------------
 
-def jeremy_briefing(request):
-
+def jeremy_briefing(request=None):
+    
     usd,kospi,samsung=get_market()
 
     global_news=get_news(GLOBAL_FEEDS)
