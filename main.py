@@ -1,12 +1,17 @@
+from flask import Flask
 import requests
 from bs4 import BeautifulSoup
 import feedparser
 import os
+from flask import Flask
+
+app = Flask(__name__)
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
 headers = {"User-Agent":"Mozilla/5.0"}
+
 
 def get_market():
 
@@ -50,7 +55,8 @@ def send_telegram(msg):
     requests.post(url, json=payload)
 
 
-def jeremy_briefing(request):
+@app.route("/")
+def jeremy_briefing():
 
     usdkrw, kospi, samsung = get_market()
 
@@ -73,4 +79,4 @@ Indonesia Automotive
 
     send_telegram(message)
 
-    return "OK"
+    return "Jeremy briefing sent"
