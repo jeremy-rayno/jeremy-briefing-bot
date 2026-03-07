@@ -276,13 +276,12 @@ def jeremy_briefing(request=None):
     comp_news=get_news(COMPETITOR_FEEDS)
 
     try:
-    global_result = analyze_global(global_news[:10])
+       global_result = analyze_global(global_news[:10])
 
-except Exception as e:
+    except Exception as e:
+       print("OpenAI error:", str(e))
 
-    print("OpenAI error:", str(e))
-
-    global_result = """
+       global_result = """
 AI 분석 실패 (OpenAI quota 또는 API 오류)
 
 대신 원문 뉴스:
