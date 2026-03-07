@@ -56,7 +56,7 @@ def send_telegram(msg):
 
 
 @app.route("/")
-def jeremy_briefing():
+def jeremy_briefing(request):
 
     usdkrw, kospi, samsung = get_market()
 
