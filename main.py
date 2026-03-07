@@ -30,18 +30,26 @@ def get_market():
     return usdkrw, kospi, samsung
 
 
+from urllib.parse import quote
+
 def get_news(query):
 
-    url = f"https://news.google.com/rss/search?q={query}"
-    feed = feedparser.parse(url)
+    try:
+        encoded_query = quote(query)
 
-    result = []
+        url = f"https://news.google.com/rss/search?q={encoded_query}"
 
-    for e in feed.entries[:3]:
-        result.append(f"{e.title}\n{e.link}")
+        feed = feedparser.parse(url)
 
-    return "\n\n".join(result)
+        result = []
 
+        for e in feed.entries[:3]:
+            result.append(f"{e.title}\n{e.link}")
+
+        return "\n\n".join(result)
+
+    except:
+        return "news error"
 
 def send_telegram(msg):
 
