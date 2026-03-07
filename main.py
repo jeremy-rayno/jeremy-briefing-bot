@@ -1,322 +1,215 @@
-import os
 import requests
 import feedparser
-from datetime import datetime, timedelta
-from urllib.parse import quote
-from difflib import SequenceMatcher
 from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 from openai import OpenAI
+import os
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+# =========================
+# ENV
+# =========================
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-# -----------------------------
-# Trusted media whitelist
-# -----------------------------
-
-TRUSTED_SOURCES = [
-"reuters.com",
-"bloomberg.com",
-"ft.com",
-"cnbc.com",
-"nikkei.com",
-"scmp.com",
-"bangkokpost.com",
-"nationthailand.com",
-"jakartapost.com",
-"straitstimes.com"
-]
-
-COMPETITOR_SOURCES = [
-"xpel.com",
-"3m.com",
-"eastman.com",
-"llumar.com",
-"solargard.com"
-]
-
-BLOCKED = [
-"blog",
-"shop",
-"store",
-"amazon",
-"alibaba",
-"prnewswire",
-"presswire",
-"medium"
-]
-
-# -----------------------------
-# RSS feeds
-# -----------------------------
+# =========================
+# RSS FEEDS
+# =========================
 
 GLOBAL_FEEDS = [
-"https://news.google.com/rss/search?q=global+economy",
-"https://news.google.com/rss/search?q=global+business"
+    "https://news.google.com/rss/search?q=global+economy&hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=global+automotive&hl=en-US&gl=US&ceid=US:en"
 ]
 
 TH_FEEDS = [
-"https://news.google.com/rss/search?q=Thailand+automotive+aftermarket"
+    "https://news.google.com/rss/search?q=Thailand+automotive&hl=en-US&gl=US&ceid=US:en"
 ]
 
 ID_FEEDS = [
-"https://news.google.com/rss/search?q=Indonesia+automotive+aftermarket"
+    "https://news.google.com/rss/search?q=Indonesia+automotive&hl=en-US&gl=US&ceid=US:en"
 ]
 
 COMPETITOR_FEEDS = [
-"https://news.google.com/rss/search?q=xpel+window+film",
-"https://news.google.com/rss/search?q=3M+window+film",
-"https://news.google.com/rss/search?q=llumar+window+film",
-"https://news.google.com/rss/search?q=solargard+window+film"
+    "https://news.google.com/rss/search?q=XPEL+window+film&hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=3M+window+film&hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=Llumar+window+film&hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=SolarGard+window+film&hl=en-US&gl=US&ceid=US:en"
 ]
 
-# -----------------------------
-# Real article URL
-# -----------------------------
+# =========================
+# MARKET DATA
+# =========================
 
-def get_real_url(url):
-    try:
-        r = requests.get(url, allow_redirects=True, timeout=5)
-        return r.url
-    except:
-        return url
+def get_market():
 
-# -----------------------------
-# Duplicate check
-# -----------------------------
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-def is_duplicate(title, titles):
-    for t in titles:
-        sim = SequenceMatcher(None, title, t).ratio()
-        if sim > 0.8:
-            return True
-    return False
+    # USD/KRW
+    fx_url = "https://finance.naver.com/marketindex/"
+    res = requests.get(fx_url, headers=headers)
+    soup = BeautifulSoup(res.text, "html.parser")
+    usd = soup.select_one("span.value").text
 
-# -----------------------------
-# Trusted source check
-# -----------------------------
+    # KOSPI
+    kospi_url = "https://finance.naver.com/sise/"
+    res = requests.get(kospi_url, headers=headers)
+    soup = BeautifulSoup(res.text, "html.parser")
+    kospi = soup.select_one("#KOSPI_now").text
 
-def trusted(url):
+    # Samsung
+    samsung_url = "https://finance.naver.com/item/main.naver?code=005930"
+    res = requests.get(samsung_url, headers=headers)
+    soup = BeautifulSoup(res.text, "html.parser")
+    samsung = soup.select_one("p.no_today span.blind").text
 
-    for b in BLOCKED:
-        if b in url:
-            return False
+    return usd, kospi, samsung
 
-    for t in TRUSTED_SOURCES:
-        if t in url:
-            return True
 
-    for c in COMPETITOR_SOURCES:
-        if c in url:
-            return True
+# =========================
+# NEWS FETCH
+# =========================
 
-    return False
+def get_news(feeds):
 
-# -----------------------------
-# 24 hour filter
-# -----------------------------
+    news = []
 
-def within_24h(entry):
+    for url in feeds:
+        feed = feedparser.parse(url)
 
-    try:
-        published = datetime(*entry.published_parsed[:6])
-        now = datetime.utcnow()
+        for entry in feed.entries:
 
-        if now - published < timedelta(hours=24):
-            return True
-
-    except:
-        pass
-
-    return False
-
-# -----------------------------
-# Fetch news
-# -----------------------------
-
-def get_news(feed_urls):
-
-    news=[]
-    titles=[]
-
-    for url in feed_urls:
-
-        feed=feedparser.parse(url)
-
-        for e in feed.entries:
-
-            if not within_24h(e):
-                continue
-
-            link=get_real_url(e.link)
-
-            if not trusted(link):
-                continue
-
-            if is_duplicate(e.title,titles):
-                continue
-
-            titles.append(e.title)
+            title = entry.title
+            link = entry.link
 
             news.append({
-                "title":e.title,
-                "url":link
+                "title": title,
+                "url": link
             })
 
     return news
 
-# -----------------------------
-# AI analyze news
-# -----------------------------
 
-def analyze_global(news):
+# =========================
+# AI ANALYSIS
+# =========================
 
-    prompt=f"""
-다음 뉴스 제목 목록에서
+def analyze_global(news_list):
 
-1️⃣ 산업 영향이 있는 뉴스만 선택
-2️⃣ 중요도 평가
-3️⃣ 상위 3개 뉴스 선정
-4️⃣ 한국어 요약 작성
+    titles = "\n".join([n["title"] for n in news_list[:5]])
+
+    prompt = f"""
+다음 글로벌 뉴스 제목을 읽고 가장 중요한 3개를 한국어로 요약해줘.
 
 뉴스:
-{news}
+{titles}
 
-출력 형식:
-
-1. 제목
-요약
-Source
+형식:
+- 핵심 뉴스1
+- 핵심 뉴스2
+- 핵심 뉴스3
 """
 
-    r=client.responses.create(
-        model="gpt-5-mini",
-        input=prompt
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
     )
 
-    return r.output_text
+    return response.choices[0].message.content
 
-# -----------------------------
-# Insight + Action
-# -----------------------------
+
+# =========================
+# INSIGHT
+# =========================
 
 def generate_insight(text):
 
-    prompt=f"""
-다음 뉴스들을 기반으로
+    prompt = f"""
+다음 뉴스 요약을 보고 자동차 애프터마켓 산업 관점에서
+전략 인사이트와 액션 포인트를 3줄로 정리해줘.
 
-1️⃣ Jeremy Insight
-2️⃣ Action Point
-
-한국어로 작성
-
-뉴스:
 {text}
 """
 
-    r=client.responses.create(
-        model="gpt-5-mini",
-        input=prompt
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
     )
 
-    return r.output_text
+    return response.choices[0].message.content
 
-# -----------------------------
-# Market data
-# -----------------------------
 
-def get_market():
-
-    r=requests.get("https://finance.naver.com/marketindex/",headers=HEADERS)
-    soup=BeautifulSoup(r.text,"html.parser")
-    usd=soup.select_one("span.value").text
-
-    r=requests.get("https://finance.naver.com/sise/",headers=HEADERS)
-    soup=BeautifulSoup(r.text,"html.parser")
-    kospi=soup.select_one("#KOSPI_now").text
-
-    r=requests.get("https://finance.naver.com/item/main.naver?code=005930",headers=HEADERS)
-    soup=BeautifulSoup(r.text,"html.parser")
-    samsung=soup.select_one("p.no_today span.blind").text
-
-    return usd,kospi,samsung
-
-# -----------------------------
-# Telegram
-# -----------------------------
+# =========================
+# TELEGRAM
+# =========================
 
 def send_telegram(msg):
 
-    url=f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-    payload={
-        "chat_id":CHAT_ID,
-        "text":msg,
-        "parse_mode":"HTML"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": msg,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
     }
 
-    requests.post(url,json=payload)
+    requests.post(url, json=payload)
 
-# -----------------------------
-# MAIN ENTRY (Cloud Run HTTP)
-# -----------------------------
+
+# =========================
+# MAIN FUNCTION
+# =========================
 
 def jeremy_briefing(request=None):
-    
-    usd,kospi,samsung=get_market()
 
-    global_news=get_news(GLOBAL_FEEDS)
-    th_news=get_news(TH_FEEDS)
-    id_news=get_news(ID_FEEDS)
-    comp_news=get_news(COMPETITOR_FEEDS)
+    usd, kospi, samsung = get_market()
+
+    global_news = get_news(GLOBAL_FEEDS)
+    th_news = get_news(TH_FEEDS)
+    id_news = get_news(ID_FEEDS)
+    comp_news = get_news(COMPETITOR_FEEDS)
 
     # Thailand fallback
-if th_news:
-    th_title = th_news[0]["title"]
-    th_url = th_news[0]["url"]
-else:
-    th_title = "관련 뉴스 없음 (24h)"
-    th_url = ""
+    if th_news:
+        th_title = th_news[0]["title"]
+        th_url = th_news[0]["url"]
+    else:
+        th_title = "관련 뉴스 없음 (24h)"
+        th_url = ""
 
-# Indonesia fallback
-if id_news:
-    id_title = id_news[0]["title"]
-    id_url = id_news[0]["url"]
-else:
-    id_title = "관련 뉴스 없음 (24h)"
-    id_url = ""
+    # Indonesia fallback
+    if id_news:
+        id_title = id_news[0]["title"]
+        id_url = id_news[0]["url"]
+    else:
+        id_title = "관련 뉴스 없음 (24h)"
+        id_url = ""
 
-# Competitor fallback (2개)
-comp_titles = []
-comp_urls = []
+    # Competitor fallback
+    comp_titles = []
+    comp_urls = []
 
-for n in comp_news[:2]:
-    comp_titles.append(n["title"])
-    comp_urls.append(n["url"])
+    for n in comp_news[:2]:
+        comp_titles.append(n["title"])
+        comp_urls.append(n["url"])
 
-while len(comp_titles) < 2:
-    comp_titles.append("관련 뉴스 없음 (24h)")
-    comp_urls.append("")
+    while len(comp_titles) < 2:
+        comp_titles.append("관련 뉴스 없음 (24h)")
+        comp_urls.append("")
 
+    # AI analysis
     try:
-       global_result = analyze_global(global_news[:10])
+        global_result = analyze_global(global_news[:10])
+    except Exception as e:
+        print("OpenAI error:", str(e))
+        global_result = "AI 분석 실패 (OpenAI quota 또는 API 오류)"
 
-   except Exception as e:
-    print("OpenAI error:", str(e))
+    insight = generate_insight(global_result)
 
-    global_result = (
-        "AI 분석 실패 (OpenAI quota 또는 API 오류)\n\n"
-        + "대신 원문 뉴스:\n"
-        + "\n".join([n["title"] for n in global_news[:3]])
-    )
-    insight=generate_insight(global_result)
-
-    msg=f"""
+    msg = f"""
 <b>Jeremy Briefing</b>
 
 Market Data
