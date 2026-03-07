@@ -275,7 +275,18 @@ def jeremy_briefing(request=None):
     id_news=get_news(ID_FEEDS)
     comp_news=get_news(COMPETITOR_FEEDS)
 
-    global_result=analyze_global(global_news[:10])
+    try:
+    global_result = analyze_global(global_news[:10])
+
+except Exception as e:
+
+    print("OpenAI error:", str(e))
+
+    global_result = """
+AI 분석 실패 (OpenAI quota 또는 API 오류)
+
+대신 원문 뉴스:
+""" + "\n".join([n["title"] for n in global_news[:3]])
 
     insight=generate_insight(global_result)
 
