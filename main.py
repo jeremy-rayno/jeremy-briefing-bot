@@ -275,6 +275,34 @@ def jeremy_briefing(request=None):
     id_news=get_news(ID_FEEDS)
     comp_news=get_news(COMPETITOR_FEEDS)
 
+    # Thailand fallback
+if th_news:
+    th_title = th_news[0]["title"]
+    th_url = th_news[0]["url"]
+else:
+    th_title = "관련 뉴스 없음 (24h)"
+    th_url = ""
+
+# Indonesia fallback
+if id_news:
+    id_title = id_news[0]["title"]
+    id_url = id_news[0]["url"]
+else:
+    id_title = "관련 뉴스 없음 (24h)"
+    id_url = ""
+
+# Competitor fallback (2개)
+comp_titles = []
+comp_urls = []
+
+for n in comp_news[:2]:
+    comp_titles.append(n["title"])
+    comp_urls.append(n["url"])
+
+while len(comp_titles) < 2:
+    comp_titles.append("관련 뉴스 없음 (24h)")
+    comp_urls.append("")
+
     try:
        global_result = analyze_global(global_news[:10])
 
@@ -301,20 +329,20 @@ Samsung {samsung}
 {global_result}
 
 <b>Thailand Automotive Aftermarket</b>
-{th_news[0]["title"]}
-<a href="{th_news[0]["url"]}">Source →</a>
+{th_title}
+{f'<a href="{th_url}">Source →</a>' if th_url else ''}
 
 <b>Indonesia Automotive Aftermarket</b>
-{id_news[0]["title"]}
-<a href="{id_news[0]["url"]}">Source →</a>
+{id_title}
+{f'<a href="{id_url}">Source →</a>' if id_url else ''}
 
 <b>Tinting Competitor News</b>
 
-{comp_news[0]["title"]}
-<a href="{comp_news[0]["url"]}">Source →</a>
+{comp_titles[0]}
+{f'<a href="{comp_urls[0]}">Source →</a>' if comp_urls[0] else ''}
 
-{comp_news[1]["title"]}
-<a href="{comp_news[1]["url"]}">Source →</a>
+{comp_titles[1]}
+{f'<a href="{comp_urls[1]}">Source →</a>' if comp_urls[1] else ''}
 
 <b>Jeremy Insight & Action</b>
 {insight}
