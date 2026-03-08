@@ -77,33 +77,33 @@ def get_market():
 
 
 # =========================
-# NEWS FETCH — NewsAPI
+# NEWS FETCH — NewsAPI (무료플랜 호환)
 # =========================
 
 def get_news(queries, page_size=5):
     """
     NewsAPI로 최신 뉴스 수집
-    - from: 24시간 이내
-    - sortBy: popularity (인기/중요 뉴스 우선)
+    - 무료플랜: from 파라미터 제거, sortBy=publishedAt 사용
     - 실제 기사 URL 반환
     """
 
     news = []
-    from_date = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     for query in queries:
         try:
             url = "https://newsapi.org/v2/everything"
             params = {
                 "q": query,
-                "from": from_date,
-                "sortBy": "popularity",
+                "sortBy": "publishedAt",   # 최신순 정렬
                 "pageSize": page_size,
                 "language": "en",
                 "apiKey": NEWS_API_KEY
             }
             res = requests.get(url, params=params, timeout=10)
             data = res.json()
+
+            # 디버깅용 로그
+            print(f"NewsAPI [{query}] status: {data.get('status')} / totalResults: {data.get('totalResults', 0)}")
 
             if data.get("status") == "ok":
                 for article in data.get("articles", []):
@@ -122,9 +122,12 @@ def get_news(queries, page_size=5):
                         "url": article_url,
                         "source": source
                     })
+            else:
+                # API 에러 상세 로그
+                print(f"NewsAPI error [{query}]: {data.get('code')} / {data.get('message')}")
 
         except Exception as e:
-            print(f"NewsAPI error ({query}):", str(e))
+            print(f"NewsAPI exception ({query}):", str(e))
 
     return news
 
@@ -140,7 +143,7 @@ def analyze_global(news_list):
     """
 
     if not news_list:
-        return [{"title": "수집된 뉴스 없음 (24h)", "summary": "", "url": "", "source": ""}]
+        return [{"title": "수집된 뉴스 없음", "summary": "", "url": "", "source": ""}]
 
     items = "\n".join([
         f"{i+1}. [{n.get('source','')}] {n['title']} | {n['url']}"
@@ -274,9 +277,7 @@ def generate_insight(news_items):
 # =========================
 
 def format_news_block(item, index=None):
-    """
-    뉴스 하나를 Telegram HTML 블록으로 변환 (번호 포함)
-    """
+
     numbers = ["1️⃣", "2️⃣", "3️⃣"]
     prefix = numbers[index] + " " if index is not None and index < len(numbers) else "• "
 
@@ -297,9 +298,7 @@ def format_news_block(item, index=None):
 
 
 def format_single_block(item):
-    """
-    태국/인도네시아/경쟁사 단일 뉴스 블록
-    """
+
     title = item.get("title", "관련 뉴스 없음 (24h)")
     summary = item.get("summary", "")
     url = item.get("url", "")
