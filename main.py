@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 from openai import OpenAI
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from notion_client import Client as NotionClient
 import os
 
 # =========================
@@ -24,7 +23,6 @@ NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DB_ID = os.getenv("NOTION_DB_ID")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-notion = NotionClient(auth=NOTION_API_KEY)
 
 # =========================
 # NEWS QUERIES
@@ -500,7 +498,7 @@ def generate_insight(th_item, id_item, comp_items):
 def save_to_notion(date_str, usd, kospi, samsung,
                    global_items, th_item, id_item, comp_items, insight):
     """
-    Notion DB에 오늘 브리핑 데이터 저장
+    Notion DB에 오늘 브리핑 데이터 저장 (requests 직접 호출)
     """
 
     def text(val):
@@ -519,54 +517,56 @@ def save_to_notion(date_str, usd, kospi, samsung,
     while len(c) < 2:
         c.append({"title": "", "summary": "", "url": ""})
 
-    properties = {
-        "Name": {"title": [{"text": {"content": f"Daily Briefing {date_str}"}}]},
-        "날짜": {"date": {"start": date_str}},
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
 
-        # 마켓 데이터
-        "USD/KRW": text(usd),
-        "KOSPI": text(kospi),
-        "Samsung": text(samsung),
-
-        # Global Top3
-        "Global 1 제목": text(g[0].get("title", "")),
-        "Global 1 요약": text(g[0].get("summary", "")),
-        "Global 1 URL": url_prop(g[0].get("url", "")),
-        "Global 2 제목": text(g[1].get("title", "")),
-        "Global 2 요약": text(g[1].get("summary", "")),
-        "Global 2 URL": url_prop(g[1].get("url", "")),
-        "Global 3 제목": text(g[2].get("title", "")),
-        "Global 3 요약": text(g[2].get("summary", "")),
-        "Global 3 URL": url_prop(g[2].get("url", "")),
-
-        # 태국
-        "태국 제목": text(th_item.get("title", "") if th_item else "관련 뉴스 없음"),
-        "태국 요약": text(th_item.get("summary", "") if th_item else ""),
-        "태국 URL": url_prop(th_item.get("url", "") if th_item else ""),
-
-        # 인도네시아
-        "인도네시아 제목": text(id_item.get("title", "") if id_item else "관련 뉴스 없음"),
-        "인도네시아 요약": text(id_item.get("summary", "") if id_item else ""),
-        "인도네시아 URL": url_prop(id_item.get("url", "") if id_item else ""),
-
-        # 경쟁사
-        "경쟁사 1 제목": text(c[0].get("title", "관련 뉴스 없음")),
-        "경쟁사 1 요약": text(c[0].get("summary", "")),
-        "경쟁사 1 URL": url_prop(c[0].get("url", "")),
-        "경쟁사 2 제목": text(c[1].get("title", "관련 뉴스 없음")),
-        "경쟁사 2 요약": text(c[1].get("summary", "")),
-        "경쟁사 2 URL": url_prop(c[1].get("url", "")),
-
-        # Insight
-        "Insight": text(insight),
+    payload = {
+        "parent": {"database_id": NOTION_DB_ID},
+        "properties": {
+            "Name": {"title": [{"text": {"content": f"Daily Briefing {date_str}"}}]},
+            "날짜": {"date": {"start": date_str}},
+            "USD/KRW": text(usd),
+            "KOSPI": text(kospi),
+            "Samsung": text(samsung),
+            "Global 1 제목": text(g[0].get("title", "")),
+            "Global 1 요약": text(g[0].get("summary", "")),
+            "Global 1 URL": url_prop(g[0].get("url", "")),
+            "Global 2 제목": text(g[1].get("title", "")),
+            "Global 2 요약": text(g[1].get("summary", "")),
+            "Global 2 URL": url_prop(g[1].get("url", "")),
+            "Global 3 제목": text(g[2].get("title", "")),
+            "Global 3 요약": text(g[2].get("summary", "")),
+            "Global 3 URL": url_prop(g[2].get("url", "")),
+            "태국 제목": text(th_item.get("title", "") if th_item else "관련 뉴스 없음"),
+            "태국 요약": text(th_item.get("summary", "") if th_item else ""),
+            "태국 URL": url_prop(th_item.get("url", "") if th_item else ""),
+            "인도네시아 제목": text(id_item.get("title", "") if id_item else "관련 뉴스 없음"),
+            "인도네시아 요약": text(id_item.get("summary", "") if id_item else ""),
+            "인도네시아 URL": url_prop(id_item.get("url", "") if id_item else ""),
+            "경쟁사 1 제목": text(c[0].get("title", "관련 뉴스 없음")),
+            "경쟁사 1 요약": text(c[0].get("summary", "")),
+            "경쟁사 1 URL": url_prop(c[0].get("url", "")),
+            "경쟁사 2 제목": text(c[1].get("title", "관련 뉴스 없음")),
+            "경쟁사 2 요약": text(c[1].get("summary", "")),
+            "경쟁사 2 URL": url_prop(c[1].get("url", "")),
+            "Insight": text(insight),
+        }
     }
 
     try:
-        notion.pages.create(
-            parent={"database_id": NOTION_DB_ID},
-            properties=properties
+        res = requests.post(
+            "https://api.notion.com/v1/pages",
+            headers=headers,
+            json=payload,
+            timeout=15
         )
-        print("Notion 저장 완료")
+        if res.status_code == 200:
+            print("Notion 저장 완료")
+        else:
+            print("Notion 저장 실패:", res.status_code, res.text[:200])
     except Exception as e:
         print("Notion 저장 실패:", str(e))
 
