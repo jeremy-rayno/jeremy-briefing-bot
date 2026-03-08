@@ -520,6 +520,7 @@ def save_to_notion(date_str, usd, kospi, samsung,
         c.append({"title": "", "summary": "", "url": ""})
 
     properties = {
+        "Name": {"title": [{"text": {"content": f"Daily Briefing {date_str}"}}]},
         "날짜": {"date": {"start": date_str}},
 
         # 마켓 데이터
