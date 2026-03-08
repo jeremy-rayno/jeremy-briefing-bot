@@ -4,6 +4,8 @@ import re
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 from openai import OpenAI
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 import os
 
 # =========================
@@ -14,6 +16,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+GOOGLE_CALENDAR_KEY = os.getenv("GOOGLE_CALENDAR_KEY")
+CALENDAR_ID_1 = os.getenv("CALENDAR_ID_1", "jeremyson@raynofilm.com")
+CALENDAR_ID_2 = os.getenv("CALENDAR_ID_2", "global@raynofilm.com")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -21,28 +26,35 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # NEWS QUERIES
 # =========================
 
-GLOBAL_QUERIES = [
-    "global economy automotive",
-    "window film PPF paint protection film market"
-]
-
+# 태국 — OR 없이 쿼리 분리
 TH_QUERIES = [
-    "Thailand window film OR PPF OR car tinting OR automotive aftermarket"
+    "Thailand window film",
+    "Thailand paint protection film",
+    "Thailand car tinting",
+    "Thailand automotive aftermarket"
 ]
 
+# 인도네시아 — OR 없이 쿼리 분리
 ID_QUERIES = [
-    "Indonesia window film OR PPF OR car tinting OR automotive aftermarket"
+    "Indonesia window film",
+    "Indonesia paint protection film",
+    "Indonesia car tinting",
+    "Indonesia automotive aftermarket"
 ]
 
+# 경쟁사 — OR 없이 쿼리 분리
 COMPETITOR_QUERIES = [
-    "XPEL window film OR paint protection film",
-    "Llumar window film OR solar control film",
-    "3M window film OR paint protection film",
-    "Suntek window film OR PPF",
-    "SolarGard window film OR solar control"
+    "XPEL window film",
+    "XPEL paint protection",
+    "Llumar window film",
+    "3M window film",
+    "3M paint protection film",
+    "Suntek window film",
+    "Suntek PPF",
+    "SolarGard window film"
 ]
 
-# 경쟁사 뉴스 신뢰 소스 도메인 화이트리스트
+# 경쟁사 신뢰 소스 도메인
 TRUSTED_DOMAINS = (
     "reuters.com,bloomberg.com,apnews.com,"
     "businesswire.com,prnewswire.com,globenewswire.com,"
@@ -86,31 +98,123 @@ def get_market():
 
 
 # =========================
+# GOOGLE CALENDAR
+# =========================
+
+def get_calendar_events():
+    """
+    jeremyson@raynofilm.com + global@raynofilm.com
+    오늘 일정 합쳐서 시간순 정렬
+    """
+
+    try:
+        # 서비스 계정 JSON 파싱
+        key_data = json.loads(GOOGLE_CALENDAR_KEY)
+        credentials = service_account.Credentials.from_service_account_info(
+            key_data,
+            scopes=["https://www.googleapis.com/auth/calendar.readonly"]
+        )
+        service = build("calendar", "v3", credentials=credentials)
+
+        # 오늘 KST 기준 시작/끝
+        now_kst = datetime.now(timezone.utc) + timedelta(hours=9)
+        today_start = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = now_kst.replace(hour=23, minute=59, second=59, microsecond=0)
+
+        # UTC로 변환
+        time_min = (today_start - timedelta(hours=9)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        time_max = (today_end - timedelta(hours=9)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        all_events = []
+
+        for calendar_id in [CALENDAR_ID_1, CALENDAR_ID_2]:
+            try:
+                result = service.events().list(
+                    calendarId=calendar_id,
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    singleEvents=True,
+                    orderBy="startTime"
+                ).execute()
+
+                for event in result.get("items", []):
+                    summary = event.get("summary", "(제목 없음)")
+                    start = event.get("start", {})
+
+                    # 시간 파싱
+                    if "dateTime" in start:
+                        dt = datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))
+                        dt_kst = dt + timedelta(hours=9) if dt.tzinfo and str(dt.tzinfo) == "UTC" else dt
+                        time_str = dt_kst.strftime("%H:%M")
+                        all_day = False
+                    else:
+                        # 하루 종일 일정
+                        time_str = "종일"
+                        all_day = True
+
+                    all_events.append({
+                        "time": time_str,
+                        "summary": summary,
+                        "all_day": all_day,
+                        "sort_key": start.get("dateTime", start.get("date", ""))
+                    })
+
+            except Exception as e:
+                print(f"Calendar error ({calendar_id}):", str(e))
+
+        # 시간순 정렬
+        all_events.sort(key=lambda x: x["sort_key"])
+        return all_events
+
+    except Exception as e:
+        print("Calendar init error:", str(e))
+        return []
+
+
+def format_calendar(events):
+
+    now_kst = datetime.now(timezone.utc) + timedelta(hours=9)
+    day_str = now_kst.strftime("%m.%d (%a)").replace(
+        "Mon", "월").replace("Tue", "화").replace("Wed", "수").replace(
+        "Thu", "목").replace("Fri", "금").replace("Sat", "토").replace("Sun", "일")
+
+    if not events:
+        return f"<b>📅 Today's Schedule</b>  <i>{day_str}</i>\n일정 없음"
+
+    lines = [f"<b>📅 Today's Schedule</b>  <i>{day_str}</i>"]
+    for e in events:
+        lines.append(f"{e['time']}  {e['summary']}")
+
+    return "\n".join(lines)
+
+
+# =========================
 # NEWS FETCH — NewsAPI
 # =========================
 
-def get_news(queries, page_size=5, trusted_only=False):
+def get_top_headlines():
+    """
+    top-headlines 엔드포인트로 글로벌 주요 뉴스 수집
+    business + technology 카테고리
+    """
 
     news = []
+    seen_urls = set()
 
-    for query in queries:
+    for category in ["business", "technology"]:
         try:
-            url = "https://newsapi.org/v2/everything"
+            url = "https://newsapi.org/v2/top-headlines"
             params = {
-                "q": query,
-                "sortBy": "publishedAt",
-                "pageSize": page_size,
+                "category": category,
                 "language": "en",
+                "pageSize": 10,
                 "apiKey": NEWS_API_KEY
             }
-
-            if trusted_only:
-                params["domains"] = TRUSTED_DOMAINS
 
             res = requests.get(url, params=params, timeout=10)
             data = res.json()
 
-            print(f"NewsAPI [{query[:40]}] status: {data.get('status')} / total: {data.get('totalResults', 0)}")
+            print(f"top-headlines [{category}] status: {data.get('status')} / total: {data.get('totalResults', 0)}")
 
             if data.get("status") == "ok":
                 for article in data.get("articles", []):
@@ -122,6 +226,9 @@ def get_news(queries, page_size=5, trusted_only=False):
                         continue
                     if not article_url:
                         continue
+                    if article_url in seen_urls:
+                        continue
+                    seen_urls.add(article_url)
 
                     news.append({
                         "title": title,
@@ -129,10 +236,62 @@ def get_news(queries, page_size=5, trusted_only=False):
                         "source": source
                     })
             else:
-                print(f"NewsAPI error [{query[:40]}]: {data.get('code')} / {data.get('message')}")
+                print(f"top-headlines error [{category}]: {data.get('code')} / {data.get('message')}")
 
         except Exception as e:
-            print(f"NewsAPI exception ({query[:40]}):", str(e))
+            print(f"top-headlines exception ({category}):", str(e))
+
+    return news
+
+
+def get_news(queries, page_size=5, sort_by="publishedAt", trusted_only=False):
+
+    news = []
+    seen_urls = set()
+
+    for query in queries:
+        try:
+            url = "https://newsapi.org/v2/everything"
+            params = {
+                "q": query,
+                "sortBy": sort_by,
+                "pageSize": page_size,
+                "language": "en",
+                "apiKey": NEWS_API_KEY
+            }
+
+            if trusted_only:
+                params["domains"] = TRUSTED_DOMAINS
+
+            res = requests.get(url, params=params, timeout=10)
+            data = res.json()
+
+            print(f"NewsAPI [{query}] status: {data.get('status')} / total: {data.get('totalResults', 0)}")
+
+            if data.get("status") == "ok":
+                for article in data.get("articles", []):
+                    title = article.get("title", "")
+                    article_url = article.get("url", "")
+                    source = article.get("source", {}).get("name", "")
+
+                    if not title or title == "[Removed]":
+                        continue
+                    if not article_url:
+                        continue
+                    if article_url in seen_urls:
+                        continue
+                    seen_urls.add(article_url)
+
+                    news.append({
+                        "title": title,
+                        "url": article_url,
+                        "source": source
+                    })
+            else:
+                print(f"NewsAPI error [{query}]: {data.get('code')} / {data.get('message')}")
+
+        except Exception as e:
+            print(f"NewsAPI exception ({query}):", str(e))
 
     return news
 
@@ -148,12 +307,12 @@ def analyze_global(news_list):
 
     items = "\n".join([
         f"{i+1}. [{n.get('source','')}] {n['title']} | {n['url']}"
-        for i, n in enumerate(news_list[:10])
+        for i, n in enumerate(news_list[:20])
     ])
 
     prompt = f"""
-아래 뉴스 목록에서 글로벌 자동차 산업, 윈도우 필름, PPF(페인트 보호 필름),
-자동차 애프터마켓 관점에서 가장 중요한 3개를 골라 분석해줘.
+아래 뉴스 목록에서 현재 글로벌에서 가장 중요하고 영향력 있는 뉴스 3개를 골라 분석해줘.
+분야 제한 없이, 많은 미디어가 헤드라인으로 다루고 있을 만큼 중요도가 높은 뉴스를 선택해줘.
 반드시 아래 JSON 형식으로만 답해줘. JSON 외에 다른 말은 절대 쓰지 마.
 title은 한국어로 번역해줘.
 summary는 한국어로 3~4문장, 150자 이내로 작성해줘.
@@ -202,27 +361,23 @@ source는 원본 그대로 복사해줘.
 
 
 # =========================
-# AI 분석 — 태국/인도네시아 관련성 필터 + 번역
+# AI 분석 — 태국/인도네시아
 # =========================
 
 def analyze_regional(news_list, country):
-    """
-    윈도우 필름/PPF/자동차 애프터마켓 관련성 높은 뉴스 1개 선택
-    관련 뉴스 없으면 None 반환
-    """
 
     if not news_list:
         return None
 
     items = "\n".join([
         f"{i+1}. [{n.get('source','')}] {n['title']} | {n['url']}"
-        for i, n in enumerate(news_list[:10])
+        for i, n in enumerate(news_list[:15])
     ])
 
     prompt = f"""
 아래는 {country} 관련 뉴스 목록이야.
-윈도우 필름, PPF(페인트 보호 필름), 썬팅, 자동차 애프터마켓과 관련성이 높은 뉴스가 있으면
-가장 관련성 높은 1개를 골라 분석해줘.
+윈도우 필름, PPF(페인트 보호 필름), 썬팅, 자동차 애프터마켓과
+직접적으로 관련성이 높은 뉴스가 있으면 가장 관련성 높은 1개를 골라 분석해줘.
 
 관련성이 있는 뉴스가 전혀 없으면 반드시 이것만 답해줘:
 {{"relevant": false}}
@@ -264,22 +419,17 @@ url은 원본 그대로 복사해줘.
 
 
 # =========================
-# AI 분석 — 경쟁사 뉴스 관련성 필터 + 번역
+# AI 분석 — 경쟁사
 # =========================
 
 def analyze_competitor(news_list):
-    """
-    실제 회사 소식(신제품, 공시, 전략 등)만 필터링
-    무관한 뉴스(중고차 경매, 차량 리뷰 등) 제외
-    관련 없으면 빈 리스트 반환
-    """
 
     if not news_list:
         return []
 
     items = "\n".join([
         f"{i+1}. [{n.get('source','')}] {n['title']} | {n['url']}"
-        for i, n in enumerate(news_list[:15])
+        for i, n in enumerate(news_list[:20])
     ])
 
     prompt = f"""
@@ -323,7 +473,6 @@ url은 원본 그대로 복사해줘.
     try:
         raw = re.sub(r"```json|```", "", raw).strip()
         result = json.loads(raw)
-
         if isinstance(result, dict) and not result.get("relevant", True):
             return []
         if isinstance(result, list):
@@ -334,22 +483,17 @@ url은 원본 그대로 복사해줘.
 
 
 # =========================
-# INSIGHT — 태국/인도네시아/경쟁사 뉴스 기반
+# INSIGHT — 태국/인도네시아/경쟁사 기반
 # =========================
 
 def generate_insight(th_item, id_item, comp_items):
-    """
-    태국/인도네시아/경쟁사 뉴스만을 기반으로 인사이트 생성
-    """
 
     news_parts = []
 
     if th_item:
         news_parts.append(f"[태국] {th_item.get('title','')}: {th_item.get('summary','')}")
-
     if id_item:
         news_parts.append(f"[인도네시아] {id_item.get('title','')}: {id_item.get('summary','')}")
-
     for item in comp_items:
         if item:
             news_parts.append(f"[경쟁사] {item.get('title','')}: {item.get('summary','')}")
@@ -430,10 +574,7 @@ def format_competitor_blocks(comp_items):
     if not comp_items:
         return "관련 뉴스 없음 (24h)"
 
-    blocks = []
-    for item in comp_items[:2]:
-        blocks.append(format_single_block(item))
-
+    blocks = [format_single_block(item) for item in comp_items[:2]]
     return "\n\n─────────────────\n\n".join(blocks)
 
 
@@ -467,11 +608,19 @@ def jeremy_briefing(request=None):
     # 시장 데이터
     usd, kospi, samsung = get_market()
 
-    # 뉴스 수집
-    global_news = get_news(GLOBAL_QUERIES, page_size=5)
-    th_news = get_news(TH_QUERIES, page_size=10)
-    id_news = get_news(ID_QUERIES, page_size=10)
-    comp_news = get_news(COMPETITOR_QUERIES, page_size=5, trusted_only=True)
+    # 캘린더 일정
+    calendar_events = get_calendar_events()
+    calendar_block = format_calendar(calendar_events)
+
+    # 글로벌 뉴스 — top-headlines
+    global_news = get_top_headlines()
+
+    # 태국/인도네시아
+    th_news = get_news(TH_QUERIES, page_size=5, sort_by="publishedAt")
+    id_news = get_news(ID_QUERIES, page_size=5, sort_by="publishedAt")
+
+    # 경쟁사 — 신뢰 도메인
+    comp_news = get_news(COMPETITOR_QUERIES, page_size=3, sort_by="publishedAt", trusted_only=True)
 
     # Global Top3 AI 분석
     try:
@@ -480,28 +629,28 @@ def jeremy_briefing(request=None):
         print("OpenAI error (global):", str(e))
         global_items = [{"title": "AI 분석 실패", "summary": str(e)[:100], "url": "", "source": ""}]
 
-    # 태국 뉴스 — 관련성 필터
+    # 태국 뉴스
     try:
         th_item = analyze_regional(th_news, "태국")
     except Exception as e:
         print("OpenAI error (thailand):", str(e))
         th_item = None
 
-    # 인도네시아 뉴스 — 관련성 필터
+    # 인도네시아 뉴스
     try:
         id_item = analyze_regional(id_news, "인도네시아")
     except Exception as e:
         print("OpenAI error (indonesia):", str(e))
         id_item = None
 
-    # 경쟁사 뉴스 — 관련성 필터
+    # 경쟁사 뉴스
     try:
         comp_items = analyze_competitor(comp_news)
     except Exception as e:
         print("OpenAI error (competitor):", str(e))
         comp_items = []
 
-    # Insight — 태국/인도네시아/경쟁사 뉴스 기반
+    # Insight
     try:
         insight = generate_insight(th_item, id_item, comp_items)
     except Exception as e:
@@ -524,6 +673,9 @@ def jeremy_briefing(request=None):
 USD/KRW  {usd}
 KOSPI  {kospi}
 Samsung  {samsung}
+
+━━━━━━━━━━━━━━━━━━━━
+{calendar_block}
 
 ━━━━━━━━━━━━━━━━━━━━
 <b>🌍 Global Top3</b>
