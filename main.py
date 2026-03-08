@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from openai import OpenAI
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from notion_client import Client as NotionClient
 import os
 
 # =========================
@@ -19,14 +20,16 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 GOOGLE_CALENDAR_KEY = os.getenv("GOOGLE_CALENDAR_KEY")
 CALENDAR_ID_1 = os.getenv("CALENDAR_ID_1", "jeremyson@raynofilm.com")
 CALENDAR_ID_2 = os.getenv("CALENDAR_ID_2", "global@raynofilm.com")
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
+NOTION_DB_ID = os.getenv("NOTION_DB_ID")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
+notion = NotionClient(auth=NOTION_API_KEY)
 
 # =========================
 # NEWS QUERIES
 # =========================
 
-# 태국 — OR 없이 쿼리 분리
 TH_QUERIES = [
     "Thailand window film",
     "Thailand paint protection film",
@@ -34,7 +37,6 @@ TH_QUERIES = [
     "Thailand automotive aftermarket"
 ]
 
-# 인도네시아 — OR 없이 쿼리 분리
 ID_QUERIES = [
     "Indonesia window film",
     "Indonesia paint protection film",
@@ -42,7 +44,6 @@ ID_QUERIES = [
     "Indonesia automotive aftermarket"
 ]
 
-# 경쟁사 — OR 없이 쿼리 분리
 COMPETITOR_QUERIES = [
     "XPEL window film",
     "XPEL paint protection",
@@ -54,7 +55,6 @@ COMPETITOR_QUERIES = [
     "SolarGard window film"
 ]
 
-# 경쟁사 신뢰 소스 도메인
 TRUSTED_DOMAINS = (
     "reuters.com,bloomberg.com,apnews.com,"
     "businesswire.com,prnewswire.com,globenewswire.com,"
@@ -102,13 +102,8 @@ def get_market():
 # =========================
 
 def get_calendar_events():
-    """
-    jeremyson@raynofilm.com + global@raynofilm.com
-    오늘 일정 합쳐서 시간순 정렬
-    """
 
     try:
-        # 서비스 계정 JSON 파싱
         key_data = json.loads(GOOGLE_CALENDAR_KEY)
         credentials = service_account.Credentials.from_service_account_info(
             key_data,
@@ -116,12 +111,10 @@ def get_calendar_events():
         )
         service = build("calendar", "v3", credentials=credentials)
 
-        # 오늘 KST 기준 시작/끝
         now_kst = datetime.now(timezone.utc) + timedelta(hours=9)
         today_start = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = now_kst.replace(hour=23, minute=59, second=59, microsecond=0)
 
-        # UTC로 변환
         time_min = (today_start - timedelta(hours=9)).strftime("%Y-%m-%dT%H:%M:%SZ")
         time_max = (today_end - timedelta(hours=9)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -141,28 +134,22 @@ def get_calendar_events():
                     summary = event.get("summary", "(제목 없음)")
                     start = event.get("start", {})
 
-                    # 시간 파싱
                     if "dateTime" in start:
                         dt = datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))
                         dt_kst = dt + timedelta(hours=9) if dt.tzinfo and str(dt.tzinfo) == "UTC" else dt
                         time_str = dt_kst.strftime("%H:%M")
-                        all_day = False
                     else:
-                        # 하루 종일 일정
                         time_str = "종일"
-                        all_day = True
 
                     all_events.append({
                         "time": time_str,
                         "summary": summary,
-                        "all_day": all_day,
                         "sort_key": start.get("dateTime", start.get("date", ""))
                     })
 
             except Exception as e:
                 print(f"Calendar error ({calendar_id}):", str(e))
 
-        # 시간순 정렬
         all_events.sort(key=lambda x: x["sort_key"])
         return all_events
 
@@ -189,14 +176,10 @@ def format_calendar(events):
 
 
 # =========================
-# NEWS FETCH — NewsAPI
+# NEWS FETCH
 # =========================
 
 def get_top_headlines():
-    """
-    top-headlines 엔드포인트로 글로벌 주요 뉴스 수집
-    business + technology 카테고리
-    """
 
     news = []
     seen_urls = set()
@@ -327,18 +310,8 @@ source는 원본 그대로 복사해줘.
     "url": "https://원본URL",
     "source": "매체명"
   }},
-  {{
-    "title": "...",
-    "summary": "...",
-    "url": "...",
-    "source": "..."
-  }},
-  {{
-    "title": "...",
-    "summary": "...",
-    "url": "...",
-    "source": "..."
-  }}
+  {{"title": "...", "summary": "...", "url": "...", "source": "..."}},
+  {{"title": "...", "summary": "...", "url": "...", "source": "..."}}
 ]
 
 뉴스 목록:
@@ -387,7 +360,7 @@ title은 한국어로 번역해줘.
 summary는 한국어로 3~4문장, 150자 이내로 작성해줘.
 url은 원본 그대로 복사해줘.
 
-출력 형식 (관련 뉴스 있을 때):
+출력 형식:
 {{
   "relevant": true,
   "title": "한국어로 번역한 제목",
@@ -483,7 +456,7 @@ url은 원본 그대로 복사해줘.
 
 
 # =========================
-# INSIGHT — 태국/인도네시아/경쟁사 기반
+# INSIGHT
 # =========================
 
 def generate_insight(th_item, id_item, comp_items):
@@ -518,6 +491,83 @@ def generate_insight(th_item, id_item, comp_items):
     )
 
     return response.choices[0].message.content.strip()
+
+
+# =========================
+# NOTION 저장
+# =========================
+
+def save_to_notion(date_str, usd, kospi, samsung,
+                   global_items, th_item, id_item, comp_items, insight):
+    """
+    Notion DB에 오늘 브리핑 데이터 저장
+    """
+
+    def text(val):
+        return {"rich_text": [{"text": {"content": str(val or "")[:2000]}}]}
+
+    def url_prop(val):
+        return {"url": val if val else None}
+
+    # Global 1~3
+    g = global_items[:3]
+    while len(g) < 3:
+        g.append({"title": "", "summary": "", "url": "", "source": ""})
+
+    # 경쟁사 1~2
+    c = comp_items[:2] if comp_items else []
+    while len(c) < 2:
+        c.append({"title": "", "summary": "", "url": ""})
+
+    properties = {
+        "날짜": {"date": {"start": date_str}},
+
+        # 마켓 데이터
+        "USD/KRW": text(usd),
+        "KOSPI": text(kospi),
+        "Samsung": text(samsung),
+
+        # Global Top3
+        "Global 1 제목": text(g[0].get("title", "")),
+        "Global 1 요약": text(g[0].get("summary", "")),
+        "Global 1 URL": url_prop(g[0].get("url", "")),
+        "Global 2 제목": text(g[1].get("title", "")),
+        "Global 2 요약": text(g[1].get("summary", "")),
+        "Global 2 URL": url_prop(g[1].get("url", "")),
+        "Global 3 제목": text(g[2].get("title", "")),
+        "Global 3 요약": text(g[2].get("summary", "")),
+        "Global 3 URL": url_prop(g[2].get("url", "")),
+
+        # 태국
+        "태국 제목": text(th_item.get("title", "") if th_item else "관련 뉴스 없음"),
+        "태국 요약": text(th_item.get("summary", "") if th_item else ""),
+        "태국 URL": url_prop(th_item.get("url", "") if th_item else ""),
+
+        # 인도네시아
+        "인도네시아 제목": text(id_item.get("title", "") if id_item else "관련 뉴스 없음"),
+        "인도네시아 요약": text(id_item.get("summary", "") if id_item else ""),
+        "인도네시아 URL": url_prop(id_item.get("url", "") if id_item else ""),
+
+        # 경쟁사
+        "경쟁사 1 제목": text(c[0].get("title", "관련 뉴스 없음")),
+        "경쟁사 1 요약": text(c[0].get("summary", "")),
+        "경쟁사 1 URL": url_prop(c[0].get("url", "")),
+        "경쟁사 2 제목": text(c[1].get("title", "관련 뉴스 없음")),
+        "경쟁사 2 요약": text(c[1].get("summary", "")),
+        "경쟁사 2 URL": url_prop(c[1].get("url", "")),
+
+        # Insight
+        "Insight": text(insight),
+    }
+
+    try:
+        notion.pages.create(
+            parent={"database_id": NOTION_DB_ID},
+            properties=properties
+        )
+        print("Notion 저장 완료")
+    except Exception as e:
+        print("Notion 저장 실패:", str(e))
 
 
 # =========================
@@ -608,63 +658,65 @@ def jeremy_briefing(request=None):
     # 시장 데이터
     usd, kospi, samsung = get_market()
 
-    # 캘린더 일정
+    # 캘린더
     calendar_events = get_calendar_events()
     calendar_block = format_calendar(calendar_events)
 
-    # 글로벌 뉴스 — top-headlines
+    # 뉴스 수집
     global_news = get_top_headlines()
-
-    # 태국/인도네시아
     th_news = get_news(TH_QUERIES, page_size=5, sort_by="publishedAt")
     id_news = get_news(ID_QUERIES, page_size=5, sort_by="publishedAt")
-
-    # 경쟁사 — 신뢰 도메인
     comp_news = get_news(COMPETITOR_QUERIES, page_size=3, sort_by="publishedAt", trusted_only=True)
 
-    # Global Top3 AI 분석
+    # AI 분석
     try:
         global_items = analyze_global(global_news)
     except Exception as e:
         print("OpenAI error (global):", str(e))
         global_items = [{"title": "AI 분석 실패", "summary": str(e)[:100], "url": "", "source": ""}]
 
-    # 태국 뉴스
     try:
         th_item = analyze_regional(th_news, "태국")
     except Exception as e:
         print("OpenAI error (thailand):", str(e))
         th_item = None
 
-    # 인도네시아 뉴스
     try:
         id_item = analyze_regional(id_news, "인도네시아")
     except Exception as e:
         print("OpenAI error (indonesia):", str(e))
         id_item = None
 
-    # 경쟁사 뉴스
     try:
         comp_items = analyze_competitor(comp_news)
     except Exception as e:
         print("OpenAI error (competitor):", str(e))
         comp_items = []
 
-    # Insight
     try:
         insight = generate_insight(th_item, id_item, comp_items)
     except Exception as e:
         print("OpenAI error (insight):", str(e))
         insight = "인사이트 생성 실패"
 
+    # 날짜
+    now_kst = datetime.now(timezone.utc) + timedelta(hours=9)
+    date_str = now_kst.strftime("%Y.%m.%d %H:%M")
+    date_only = now_kst.strftime("%Y-%m-%d")
+
+    # Notion 저장
+    try:
+        save_to_notion(
+            date_only, usd, kospi, samsung,
+            global_items, th_item, id_item, comp_items, insight
+        )
+    except Exception as e:
+        print("Notion error:", str(e))
+
     # Global Top3 포맷
     global_blocks = "\n\n─────────────────\n\n".join([
         format_news_block(item, i) for i, item in enumerate(global_items[:3])
     ])
-
-    # 날짜
-    now_kst = datetime.now(timezone.utc) + timedelta(hours=9)
-    date_str = now_kst.strftime("%Y.%m.%d %H:%M")
 
     # 최종 메시지
     msg = f"""<b>📋 Daily Briefing</b>  <i>{date_str} KST</i>
